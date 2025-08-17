@@ -1,0 +1,59 @@
+name: Mirror to self-hosted (HTTPS)
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["*"]
+  delete: {}
+  create: {}
+  workflow_dispatch: {}
+  schedule:
+    - cron: "17 3 * * 1"
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure all refs/tags from origin
+        run: |
+          git fetch origin --prune --tags --force
+      - name: Build mirror URL with credentials
+        id: build
+        run: |
+          enc_user="${{ secrets.MIRROR_HTTP_USER }}"
+          enc_tok="${{ secrets.MIRROR_HTTP_TOKEN }}"
+          url="${{ secrets.MIRROR_URL }}"
+          safe_url="$(echo "$url" | sed -E 's#^https://#https://'"$enc_user"':'"$enc_tok"'@#')"
+          echo "url=$safe_url" >> $GITHUB_OUTPUT
+      - name: Add mirror remote (HTTPS with creds)
+        run: |
+          git remote remove mirror 2>/dev/null || true
+          git remote add mirror "${{ steps.build.outputs.url }}"
+          git remote -v
+      - name: Configure Git LFS (silence locking warning)
+        run: |
+          git lfs install
+          git config --global lfs.locksverify true
+      - name: Push branches & tags (no force)
+        id: push_try
+        continue-on-error: true
+        run: |
+          git push mirror --all --prune
+          git push mirror --tags --prune
+      - name: Fail helpfully (force disabled by policy)
+        if: steps.push_try.outcome == 'failure'
+        run: |
+          echo "::error::Push was rejected (remote ahead). Force push is DISABLED by policy in this workflow."
+          echo "::error::Make the target repo empty or run a separate, approved force workflow."
+          exit 1
+      - name: Push LFS objects
+        run: |
+          git lfs push --all mirror || true
